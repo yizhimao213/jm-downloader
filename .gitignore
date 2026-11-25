@@ -23,3 +23,6 @@ config.json.tmp
 # 编辑器
 .vscode/
 .idea/
+
+# wrangler 本地缓存
+.wrangler/

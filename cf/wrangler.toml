@@ -1,0 +1,23 @@
+name = "jm-downloader"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# 绑定自定义域名（由 Cloudflare 自动创建 CNAME 与证书）
+# 注意：必须写在 [vars] 之前，否则会被解析成普通环境变量
+routes = [
+  { pattern = "jm.ixoxi.cn", custom_domain = true }
+]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/jm/*", "/media/*", "/api/*"]
+
+[vars]
+MEDIA_API = "https://media-api.ixoxi.cn"
+MEDIA_SITE = "https://media.ixoxi.cn"
+CREATE_ALBUM = "true"
+
+[observability]
+enabled = true

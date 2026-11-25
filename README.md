@@ -1,46 +1,59 @@
 # 禁漫采集台
 
-自托管的禁漫天堂（JM）采集后台：搜索 / 排行 / 作者页 → 批量下载 → 自动解密 → 上传影像馆建相册。
-后端 Python 标准库 HTTP 服务 + jmcomic，前端单页（Alpine + Tailwind）。
+搜索 / 排行 / 作者页 → 批量采集 → 自动解密 → 上传影像馆建相册。
 
-## 功能
+线上版本跑在 **Cloudflare Workers 免费档**，本机不需要运行任何常驻进程。
 
-- 关键词检索、JM 号直查、热门排行、作者作品
-- 批量选择 → 后台任务下载 → 自动解密 → 上传影像馆建相册
-- 任务进度、失败重试（每张 3 轮）、日志逐条可见
-- 配置可在网页「设置」修改并落盘（密码不回显）
+## 线上架构
 
-## 本地运行
-
-```bash
-pip install -r deploy/requirements.txt
-python server.py           # 默认 http://localhost:8899
+```
+浏览器（你的电脑）
+ ├─ 搜索/详情：Worker 转发禁漫接口 → 浏览器用 AES-256-ECB 解密 JSON
+ ├─ 图片：Worker 转发图床字节 → canvas 逐段重排还原
+ └─ 上传：Worker 反代影像馆 API → 建相册、写 items
+Cloudflare Worker（免费档）
+ └─ 只做字节转发，不做解密 → 单次请求 CPU 接近 0，不触发 10ms 限制
 ```
 
-## Docker
+这样安排的原因：免费 Worker 每次请求只有 10ms CPU，Python 版解密一张图就要 200ms 以上；把解密挪到浏览器后，Worker 只剩转发，免费档可以长期在线、无休眠、无额度限制。
+
+## 目录
+
+| 路径 | 说明 |
+|---|---|
+| `cf/worker.js` | Worker：禁漫接口转发、图床代理（多节点自动切换）、影像馆反代 |
+| `cf/public/index.html` | 前端页面 |
+| `cf/public/assets/jmclient.js` | 浏览器数据层：MD5、AES-256-ECB、图片重排、上传 |
+| `cf/wrangler.toml` | 部署配置（自定义域名 `jm.ixoxi.cn`） |
+| `server.py` / `Dockerfile` / `render.yaml` | 早期 Python 版，保留作本地开发参考，线上不使用 |
+
+## 部署
 
 ```bash
-docker build -t jm-downloader .
-docker run -p 8899:8080 --env-file .env jm-downloader
+cd cf
+export CLOUDFLARE_API_TOKEN=...      # 需要 Workers Scripts:Edit、Workers Routes:Edit、DNS:Edit、Zone:Read
+export CLOUDFLARE_ACCOUNT_ID=...
+npx wrangler deploy
 ```
 
-## 部署（Render 免费档）
+`wrangler.toml` 里已声明 `routes = [{ pattern = "jm.ixoxi.cn", custom_domain = true }]`，部署时会自动创建 CNAME 与证书。同名 DNS 记录必须事先删除，否则报 `code 100117`。
 
-仓库已带 `render.yaml`。在 Render 新建 Blueprint 并连本仓库，环境变量按需填：
+## 配置
+
+影像馆地址写在 `wrangler.toml` 的 `[vars]`：
 
 | 变量 | 说明 |
 |---|---|
-| `MEDIA_API` | 影像馆后端 API，如 `https://media-api.example.com` |
+| `MEDIA_API` | 影像馆后端 API |
 | `MEDIA_SITE` | 影像馆前台地址 |
-| `ADMIN_PASSWORD` | 影像馆后台密码 |
-| `TARGET_FOLDER` | 相册文件夹前缀，留空=用漫画名 |
-| `DOWNLOAD_THREAD` | 图片并发数，免费档建议 6 |
+| `CREATE_ALBUM` | 是否自动建相册 |
 
-免费档特性：512MB / 0.1 CPU、750 实例小时每月、15 分钟无请求休眠、冷启动约 47 秒、免费自定义域名。
+影像馆后台密码与并存数量存在浏览器 `localStorage`，在网页右上角「设置」里填写，不经过服务端也不入仓库。
 
-## 环境变量覆盖
+## 技术要点
 
-`PORT` `MEDIA_API` `MEDIA_SITE` `ADMIN_PASSWORD` `TARGET_FOLDER` `CREATE_ALBUM`
-`JM_PROXY` `JM_IMAGE_SUFFIX` `JM_CLIENT_IMPL` `DOWNLOAD_THREAD`
-
-环境变量优先级高于容器内 `config.json`；`config.json` 含凭据，不随仓库分发。
+- **token**：`md5(ts + "185Hcomic3PAPP7R")`，`tokenparam = "{ts},2.1.13"`
+- **响应解密**：base64 → AES-256-ECB（密钥为上述 md5 的 32 个 ASCII 字符）→ 去 PKCS7 填充
+- **图片分割数**：`aid < scramble_id` 为 0；`< 268850` 为 10；否则 `md5(aid+filename)` 末位 `% (aid<421926?10:8) * 2 + 2`
+- **图片重排**：高度按 num 等分，从底部往上取段贴到顶部，余数并入首段
+- **图床**：`jmapinodeudzn.net` 系列对 Cloudflare 出口可用，`jmapiproxy*.cc` 会被 403，Worker 按顺序自动换节点

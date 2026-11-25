@@ -28,12 +28,13 @@
     }
   };
 </script>
+<script src="/assets/jmclient.js"></script>
 <script src="/assets/lucide.js"></script>
 <script src="/assets/alpine.js" defer></script>
 <script>
+  // 数据层由 assets/jmclient.js 提供：解密、取图、上传全部在浏览器完成
   async function api(path, opts = {}) {
-    const r = await fetch(path, opts);
-    return r.json();
+    return window.JMApi(path, opts);
   }
   document.addEventListener('alpine:init', () => {
     Alpine.data('jmApp', () => ({
