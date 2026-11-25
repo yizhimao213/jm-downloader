@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "jm_proxy": "",                                # 留空=继承环境代理；可填 http://127.0.0.1:7890
     "jm_image_suffix": "",                         # 留空=原格式；可填 .jpg/.png/.webp
     "jm_client_impl": "api",                       # api（推荐）/ html
-    "download_thread": 16,                         # 图片并发下载数
+    "download_thread": 6,                          # 图片并发下载数（小规格容器必需，16 线程会压死 0.5 核）
 }
 
 # 允许持久化到 config.json 的字段（重启后自动恢复）
