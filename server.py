@@ -14,7 +14,6 @@ from urllib.parse import urlparse, parse_qs, unquote
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError as UrlHTTPError
 import ssl
-import sources  # 多源适配层：jm / wnacg / pica
 
 # ---------------- 配置 ----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,15 +31,12 @@ DEFAULT_CONFIG = {
     "jm_image_suffix": "",                         # 留空=原格式；可填 .jpg/.png/.webp
     "jm_client_impl": "api",                       # api（推荐）/ html
     "download_thread": 16,                         # 图片并发下载数
-    "source_proxy": "",                            # wnacg/pica 走的代理，留空=直连（容器部署留空）
-    "pica_account": "",                            # 哔咔账号（存本地 config.json）
-    "pica_password": "",                           # 哔咔密码（存本地 config.json，页面不回显）
 }
 
 # 允许持久化到 config.json 的字段（重启后自动恢复）
 PERSIST_KEYS = ('media_api', 'media_site', 'target_folder', 'create_album',
                 'jm_proxy', 'jm_image_suffix', 'jm_client_impl', 'download_thread',
-                'source_proxy', 'pica_account', 'pica_password', 'media_password')
+                'media_password')
 
 
 def load_config():
@@ -56,8 +52,7 @@ def load_config():
         'PORT': 'port', 'MEDIA_API': 'media_api', 'MEDIA_SITE': 'media_site',
         'ADMIN_PASSWORD': 'media_password', 'TARGET_FOLDER': 'target_folder',
         'CREATE_ALBUM': 'create_album', 'JM_PROXY': 'jm_proxy',
-        'SOURCE_PROXY': 'source_proxy', 'PICA_ACCOUNT': 'pica_account',
-        'PICA_PASSWORD': 'pica_password', 'DOWNLOAD_THREAD': 'download_thread',
+        'DOWNLOAD_THREAD': 'download_thread',
     }
     for ek, ck in env_map.items():
         if ek in os.environ:
@@ -561,145 +556,6 @@ def fill_missing_images(client, jm_id, work, log):
     return filled
 
 
-# ---------------- 多源任务执行 ----------------
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif')
-
-
-def run_source_job(job):
-    """wnacg / pica 的通用任务：解析图片直链 -> 并发下载 -> 上传影像馆。"""
-    source = job.get('source') or 'wnacg'
-    aid = str(job.get('item_id') or '')
-    jid = job['id']
-
-    def log(msg):
-        with RUNTIME['jobs_lock']:
-            job['logs'].append(msg)
-            job['logs'] = job['logs'][-100:]
-        print(f'[{jid[:6]}] {msg}')
-
-    def set_status(s, **kw):
-        with RUNTIME['jobs_lock']:
-            job['status'] = s
-            job.update(kw)
-
-    work = os.path.join(TMP_DIR, jid)
-    os.makedirs(work, exist_ok=True)
-    try:
-        set_status('running', phase='解析图片地址')
-        log(f'开始采集 {sources.SOURCE_LABELS.get(source, source)} {aid}')
-        images, detail = sources.source_all_images(source, aid, CFG, log)
-        title = detail.get('title') or f'{source}{aid}'
-        author = detail.get('author') or ''
-        job['title'] = title
-        job['author'] = author
-        # 统一命名：<源前缀><编号> - 作者 - 漫画名
-        prefix = f'{source.upper()}{aid}'
-        cname = re.sub(r'[\\/:*?"<>|]', '-', f'{prefix} - {author} - {title}')
-        cname = re.sub(r'\s+', ' ', cname).strip(' -')[:80]
-        job['comic_name'] = cname
-        log('标题：' + title[:60])
-        log('文件夹/文件名：' + cname)
-        job['expected'] = len(images)
-        if not images:
-            raise RuntimeError('没有解析到图片地址')
-        log(f'共 {len(images)} 张，开始下载')
-
-        set_status('running', phase='下载图片')
-        proxy = sources.get_source_config(CFG)['proxy']
-        failed = []
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def fetch(item, attempt=1):
-            ext = os.path.splitext(urllib.parse.urlparse(item['url']).path)[1] or '.jpg'
-            if ext.lower() not in IMAGE_EXTS:
-                ext = '.jpg'
-            fp = os.path.join(work, f"{item['index']:05d}{ext}")
-            if os.path.exists(fp) and os.path.getsize(fp) > 1000:
-                return fp
-            referer = (sources.WNACG_HOST + '/' if source == 'wnacg'
-                       else 'https://www.picacomic.com/' if source == 'pica' else '')
-            data = sources.http_get(item['url'], proxy=proxy,
-                                    headers={'Referer': referer, 'User-Agent': 'Mozilla/5.0'},
-                                    timeout=45, retries=2, raw=True)
-            if not data or len(data) < 1000:
-                raise RuntimeError('图片内容为空')
-            with open(fp, 'wb') as f:
-                f.write(data)
-            return fp
-
-        with ThreadPoolExecutor(max_workers=max(2, int(CFG.get('download_thread', 12)))) as ex:
-            futures = {ex.submit(fetch, it): it for it in images}
-            done_count = 0
-            for fut in as_completed(futures):
-                it = futures[fut]
-                try:
-                    fut.result()
-                except Exception as e:
-                    failed.append(it)
-                    if len(failed) == 1:
-                        log(f'下载异常样例：{type(e).__name__}: {str(e)[:160]}')
-                done_count += 1
-                if done_count % 10 == 0 or done_count == len(images):
-                    with RUNTIME['jobs_lock']:
-                        job['done'] = done_count
-                        job['total'] = len(images)
-                    log(f'下载进度 {done_count}/{len(images)}')
-        # 失败重试（逐张，最多 3 次）
-        if failed:
-            log(f'首轮失败 {len(failed)} 张，开始重试')
-            for attempt in range(1, 4):
-                still = []
-                for it in failed:
-                    try:
-                        fetch(it)
-                    except Exception:
-                        still.append(it)
-                failed = still
-                if not failed:
-                    break
-                log(f'第 {attempt} 轮重试后仍失败 {len(failed)} 张')
-                time.sleep(attempt)
-        local = collect_images(work)
-        job['missing'] = max(0, len(images) - len(local))
-        log(f'下载完成：{len(local)}/{len(images)} 张' + (f'，缺 {job["missing"]} 张' if job['missing'] else ''))
-
-        set_status('running', phase='上传影像馆')
-        prefix_cfg = CFG.get('target_folder', '').strip().strip('/')
-        folder = (prefix_cfg + '/' + cname) if prefix_cfg else cname
-        log('影像馆文件夹：' + folder)
-        album_id = None
-        if CFG['create_album']:
-            album_id = get_or_create_album(cname, f'{sources.SOURCE_LABELS.get(source, source)} {aid} · {title[:100]}')
-        item_ids = []
-        tags = [sources.SOURCE_LABELS.get(source, source), f'{source.upper()}{aid}']
-        for i, fp in enumerate(local, 1):
-            ext = os.path.splitext(fp)[1] or '.jpg'
-            m = re.search(r'(\d+)', os.path.basename(fp))
-            idx = int(m.group(1)) if m else i
-            disp = f'{cname}-{idx:05d}{ext}'
-            try:
-                iid, _ = upload_and_register(fp, f'{cname} - {idx:05d}', folder, tags, display_name=disp)
-                if iid:
-                    item_ids.append(iid)
-            except Exception as e:
-                log(f'第 {i}/{len(local)} 张上传失败：{str(e)[:100]}')
-            with RUNTIME['jobs_lock']:
-                job['done'] = i
-                job['total'] = len(local)
-            if i % 10 == 0 or i == len(local):
-                log(f'上传进度 {i}/{len(local)}')
-        if album_id:
-            add_to_album(item_ids, album_id)
-        set_status('done', phase='完成', done=len(local), total=len(local), item_count=len(item_ids))
-        log(f'全部完成：{len(item_ids)} 张已入库，相册 id={album_id}')
-    except Exception as e:
-        set_status('error', phase='失败', error=str(e)[:400])
-        log('失败：' + str(e)[:200])
-        log(traceback.format_exc()[-500:])
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-
-
 # ---------------- 任务执行 ----------------
 def run_job(job):
     """后台线程：下载本子 -> 上传影像馆。"""
@@ -863,24 +719,11 @@ class Handler(BaseHTTPRequestHandler):
             safe = dict(CFG)
             safe['has_password'] = bool(CFG['media_password'])
             safe['media_password'] = ''
-            safe['has_pica_password'] = bool(CFG.get('pica_password'))
-            safe['pica_password'] = ''
-            safe['has_source_proxy'] = bool(CFG.get('source_proxy'))
             return self.send_json(safe)
         if path == '/api/filters':
             return self.send_json({
                 'orders': FILTER_ORDERS, 'times': FILTER_TIMES,
                 'categories': FILTER_CATEGORIES, 'subCategories': FILTER_SUBCATEGORIES,
-                'sources': [{'value': s, 'label': sources.SOURCE_LABELS[s]} for s in sources.SOURCES],
-                'sourceCategories': {
-                    'jm': FILTER_CATEGORIES,
-                    'wnacg': [{'value': k, 'label': v} for k, v in [
-                        ('0', '全部分类'), ('doujin', '同人誌'), ('single', '单行本'),
-                        ('short', '杂志短篇'), ('cg', 'CG画集'), ('3D', '3D漫画'),
-                        ('cosplay', 'Cosplay'), ('japanese', '日语'), ('chinese', '汉化'),
-                        ('english', '英文'), ('ai', 'AI图集'), ('magazine', '杂志')]],
-                    'pica': [{'value': '0', 'label': '全部'}],
-                },
             })
         if path == '/api/search':
             kw = (q.get('q', [''])[0] or '').strip()
@@ -894,27 +737,6 @@ class Handler(BaseHTTPRequestHandler):
                 q.get('category', ['0'])[0], q.get('subCategory', [''])[0])
             if not kw:
                 return self.send_json({'error': '请输入关键词'}, 400)
-            source = (q.get('source', ['jm'])[0] or 'jm').strip().lower()
-            if source in ('wnacg', 'pica'):
-                try:
-                    data = sources.source_search(source, kw, page, CFG,
-                                                 order, time_range, category, sub_category)
-                    # wnacg / pica 的纯数字视为编号直接查详情
-                    if source == 'wnacg' and re.fullmatch(r'\d{3,9}', kw):
-                        try:
-                            d = sources.wnacg_detail(kw, sources.get_source_config(CFG)['proxy'])
-                            data = {'results': [{
-                                'id': d['id'], 'title': d['title'],
-                                'author': d['author'], 'authors': d['authors'],
-                                'tags': d['tags'], 'pages': d['pages'],
-                                'cover': f"/api/cover?source=wnacg&id={d['id']}"
-                                         + (('&u=' + urllib.parse.quote(d['cover_url'], safe='')) if d['cover_url'] else ''),
-                            }], 'total': 1, 'page': 1, 'is_id': True, 'source': 'wnacg'}
-                        except Exception as de:
-                            return self.send_json({'error': '查询编号失败：' + str(de)[:300]}, 500)
-                    return self.send_json(data)
-                except Exception as e:
-                    return self.send_json({'error': str(e)[:300]}, 500)
             is_id = bool(re.fullmatch(r'\d{3,9}', kw))
             try:
                 client = jm_client()
@@ -950,16 +772,6 @@ class Handler(BaseHTTPRequestHandler):
             time_range = (q.get('time', [''])[0] or '').strip()
             sub_category = (q.get('subCategory', [''])[0] or '').strip()
             page = max(1, min(page, 50))
-            source = (q.get('source', ['jm'])[0] or 'jm').strip().lower()
-            if source in ('wnacg', 'pica'):
-                try:
-                    data = sources.source_ranking(source, mode, page, CFG, category,
-                                                  order=order, time_range=time_range,
-                                                  sub_category=sub_category)
-                    data['is_id'] = False
-                    return self.send_json(data)
-                except Exception as e:
-                    return self.send_json({'error': str(e)[:300]}, 500)
             try:
                 data = ranking_page(mode, page, category, order, time_range, sub_category)
                 data['is_id'] = False
@@ -979,44 +791,12 @@ class Handler(BaseHTTPRequestHandler):
             time_range = (q.get('time', [''])[0] or '').strip()
             category = (q.get('category', ['0'])[0] or '0').strip()
             sub_category = (q.get('subCategory', [''])[0] or '').strip()
-            source = (q.get('source', ['jm'])[0] or 'jm').strip().lower()
-            if source in ('wnacg', 'pica'):
-                try:
-                    return self.send_json(sources.source_author(
-                        source, author, page, CFG, order=order, time_range=time_range,
-                        category=category, sub_category=sub_category))
-                except Exception as e:
-                    return self.send_json({'error': str(e)[:300]}, 500)
             try:
                 return self.send_json(author_page(author, page, order, time_range, category, sub_category))
             except Exception as e:
                 return self.send_json({'error': str(e)[:300]}, 500)
         if path == '/api/cover':
             jm_id = (q.get('id', [''])[0] or '').strip()
-            source = (q.get('source', ['jm'])[0] or 'jm').strip().lower()
-            direct = (q.get('u', [''])[0] or '').strip()
-            if source in ('wnacg', 'pica'):
-                try:
-                    ck = f'cover_{source}_{jm_id}.img'
-                    cf = os.path.join(TMP_DIR, ck)
-                    if os.path.exists(cf) and time.time() - os.path.getmtime(cf) < 86400:
-                        img = open(cf, 'rb').read()
-                    else:
-                        img = sources.source_cover(source, jm_id, CFG, direct)
-                        if not img:
-                            return self.send_json({'error': '封面获取失败'}, 404)
-                        os.makedirs(TMP_DIR, exist_ok=True)
-                        with open(cf, 'wb') as f:
-                            f.write(img)
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'image/jpeg')
-                    self.send_header('Content-Length', str(len(img)))
-                    self.send_header('Cache-Control', 'max-age=86400')
-                    self.end_headers()
-                    self.wfile.write(img)
-                except Exception as e:
-                    return self.send_json({'error': str(e)[:200]}, 404)
-                return
             try:
                 if not jm_id.isdigit():
                     return self.send_json({'error': '无效 JM 号'}, 400)
@@ -1083,12 +863,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/config':
             # 只更新允许的配置项，密码只存内存
             allowed = ['media_api', 'media_site', 'target_folder', 'create_album',
-                       'jm_proxy', 'jm_image_suffix', 'jm_client_impl', 'download_thread',
-                       'source_proxy']
-            # 账号密码只存内存
-            for k in ('pica_account', 'pica_password'):
-                if k in data and data[k]:
-                    CFG[k] = data[k]
+                       'jm_proxy', 'jm_image_suffix', 'jm_client_impl', 'download_thread']
             with CFG_LOCK:
                 for k in allowed:
                     if k in data:
@@ -1114,21 +889,19 @@ class Handler(BaseHTTPRequestHandler):
             ids = [str(i).strip() for i in ids if str(i).strip()][:20]
             if not ids:
                 return self.send_json({'error': '没有选本子'}, 400)
-            source = (data.get('source') or 'jm').strip().lower()
             jobs = []
             for jm_id in ids:
                 jid = uuid.uuid4().hex
                 job = {
-                    'id': jid, 'jm_id': jm_id, 'item_id': jm_id, 'source': source,
+                    'id': jid, 'jm_id': jm_id,
                     'status': 'queued', 'phase': '排队中', 'title': '', 'done': 0, 'total': 0,
                     'logs': [], 'error': '', 'created': int(time.time()),
                 }
                 with RUNTIME['jobs_lock']:
                     RUNTIME['jobs'][jid] = job
-                target = run_source_job if source in ('wnacg', 'pica') else run_job
-                t = threading.Thread(target=target, args=(job,), daemon=True)
+                t = threading.Thread(target=run_job, args=(job,), daemon=True)
                 t.start()
-                jobs.append({'id': jid, 'jm_id': jm_id, 'source': source})
+                jobs.append({'id': jid, 'jm_id': jm_id})
             return self.send_json({'ok': True, 'jobs': jobs})
 
         if path == '/api/clear-jobs':

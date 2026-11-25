@@ -38,8 +38,6 @@
   document.addEventListener('alpine:init', () => {
     Alpine.data('jmApp', () => ({
       cfg: {},
-      source: 'jm',
-      sourceName: '禁漫天堂',
       view: 'search',
       query: '',
       page: 1,
@@ -55,11 +53,6 @@
       filterTime: 'a',
       filterCategory: '0',
       filterSubCategory: '',
-      sourceOptions: [
-        { value:'jm', label:'禁漫天堂', desc:'JM 号 / 汉化本' },
-        { value:'wnacg', label:'绅士漫画', desc:'wnacg.com 汉化本' },
-        { value:'pica', label:'哔咔漫画', desc:'PicACG 需账号' }
-      ],
       rankTabs: [
         { value:'hot', label:'热门总榜', order:'mv', time:'a' },
         { value:'day', label:'日榜', order:'mv', time:'t' },
@@ -78,8 +71,7 @@
       toast: { show:false, msg:'', type:'' },
       settings: {
         media_api:'', media_password:'', target_folder:'',
-        create_album:true, jm_proxy:'', download_thread:16,
-        source_proxy:'', pica_account:'', pica_password:''
+        create_album:true, jm_proxy:'', download_thread:16
       },
 
       init() {
@@ -95,8 +87,7 @@
         } catch (e) { /* 使用默认空选项，页面仍可用 */ }
       },
       get categoryOptions() {
-        const map = this.filters.sourceCategories || {};
-        return map[this.source] || this.filters.categories || [];
+        return this.filters.categories || [];
       },
       get subCategoryOptions() {
         const map = this.filters.subCategories || {};
@@ -140,10 +131,7 @@
             target_folder: this.cfg.target_folder || '',
             create_album: !!this.cfg.create_album,
             jm_proxy: this.cfg.jm_proxy || '',
-            download_thread: this.cfg.download_thread || 16,
-            source_proxy: this.cfg.source_proxy || '',
-            pica_account: this.cfg.pica_account || '',
-            pica_password: ''
+            download_thread: this.cfg.download_thread || 16
           });
           await this.ping();
         } catch (e) { this.online = false; }
@@ -155,23 +143,6 @@
         } catch (e) { this.online = false; }
       },
 
-      switchSource(s) {
-        if (this.source === s) return;
-        this.source = s;
-        this.sourceName = (this.sourceOptions.find(x => x.value === s) || {}).label || s;
-        this.results = [];
-        this.selected = [];
-        this.errMsg = '';
-        this.resetFilters();
-        this.results = [];
-        if (s === 'pica' && !(this.cfg.pica_account || this.settings.pica_account)) {
-          this.notify('切换到哔咔漫画，请在设置里填写账号密码', 'err');
-        }
-        this.$nextTick(() => window.lucide && lucide.createIcons());
-      },
-      sourceQuery() {
-        return `source=${encodeURIComponent(this.source)}`;
-      },
       switchView(v) {
         this.view = v;
         if (v === 'rank') {
@@ -191,7 +162,7 @@
         this.loading = true;
         this.errMsg = '';
         try {
-          const d = await api(`/api/ranking?type=${encodeURIComponent(this.rankType)}&page=${this.rankPage}&${this.sourceQuery()}&${this.filterQuery()}`);
+          const d = await api(`/api/ranking?type=${encodeURIComponent(this.rankType)}&page=${this.rankPage}&${this.filterQuery()}`);
           if (d.error) throw new Error(d.error);
           this.results = d.results || [];
           this.total = d.total || 0;
@@ -210,7 +181,7 @@
         this.loading = true;
         this.errMsg = '';
         try {
-          const d = await api(`/api/author?author=${encodeURIComponent(this.authorName)}&page=${this.authorPage}&${this.sourceQuery()}&${this.filterQuery()}`);
+          const d = await api(`/api/author?author=${encodeURIComponent(this.authorName)}&page=${this.authorPage}&${this.filterQuery()}`);
           if (d.error) throw new Error(d.error);
           this.results = d.results || [];
           this.total = d.total || 0;
@@ -250,7 +221,7 @@
         this.loading = true;
         this.errMsg = '';
         try {
-          const d = await api(`/api/search?q=${encodeURIComponent(q)}&page=${p}&${this.sourceQuery()}&${this.filterQuery()}`);
+          const d = await api(`/api/search?q=${encodeURIComponent(q)}&page=${p}&${this.filterQuery()}`);
           if (d.error) throw new Error(d.error);
           this.results = d.results || [];
           this.total = d.total || 0;
@@ -280,7 +251,7 @@
         if (!ids.length) return;
         const d = await api('/api/download', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ ids, source: this.source })
+          body: JSON.stringify({ ids })
         });
         if (d.error) { this.notify(d.error, 'err'); return; }
         this.notify(`已提交 ${d.jobs.length} 个采集任务`, 'ok');
@@ -319,7 +290,6 @@
 
       openSettings() {
         this.settings.media_password = '';
-        this.settings.pica_password = '';
         this.settingsOpen = true;
         this.$nextTick(() => window.lucide && lucide.createIcons());
       },
@@ -420,23 +390,6 @@
       </button>
     </nav>
 
-    <div class="mt-7">
-      <div class="px-3.5 text-[9px] font-semibold uppercase tracking-[.18em] text-faint">数据来源</div>
-      <div class="mt-2 flex flex-col gap-1">
-        <template x-for="s in sourceOptions" :key="s.value">
-          <button @click="switchSource(s.value)"
-                  class="flex items-center justify-between rounded-lg px-3.5 py-2 text-left text-[12px] transition-colors"
-                  :class="source === s.value ? 'bg-white/[.07] text-cream' : 'text-mute hover:bg-white/5'">
-            <span class="flex items-center gap-2.5">
-              <span class="size-1.5 rounded-full" :class="source === s.value ? 'bg-acc' : 'bg-line'"></span>
-              <span x-text="s.label"></span>
-            </span>
-            <i x-show="source === s.value" data-lucide="check" class="size-3.5 text-acc"></i>
-          </button>
-        </template>
-      </div>
-    </div>
-
     <div class="mt-auto border-t border-line px-2 pt-5">
       <div class="flex items-center gap-2.5 text-[11px] text-mute">
         <span class="size-2 rounded-full" :class="online ? 'bg-okc shadow-[0_0_0_4px_rgba(120,140,93,.13)]' : 'bg-red-400 pulse-dot'"></span>
@@ -534,16 +487,6 @@
 
       <!-- 结果区 -->
       <section class="mt-14">
-        <!-- 数据来源快捷切换（移动端可用） -->
-        <div class="mb-5 flex flex-wrap items-center gap-2">
-          <span class="mr-1 text-[10px] uppercase tracking-[.14em] text-faint">来源</span>
-          <template x-for="s in sourceOptions" :key="s.value">
-            <button @click="switchSource(s.value)"
-                    class="rounded-full border px-3.5 py-1.5 text-[11px] transition-colors"
-                    :class="source === s.value ? 'border-acc bg-acc text-ink font-semibold' : 'border-line bg-elev text-mute hover:text-cream'"
-                    x-text="s.label"></button>
-          </template>
-        </div>
         <div class="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-4">
           <div>
             <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.18em] text-faint"
@@ -834,23 +777,6 @@
         <label class="mb-2 block text-[11px] text-mute">jmcomic 代理（留空 = 用系统环境代理）</label>
         <input x-model="settings.jm_proxy" type="text" placeholder="http://127.0.0.1:7890"
                class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
-      </div>
-      <div>
-        <label class="mb-2 block text-[11px] text-mute">绅士漫画 / 哔咔代理（留空 = 直连；本机部署填 http://127.0.0.1:7897）</label>
-        <input x-model="settings.source_proxy" type="text" placeholder="http://127.0.0.1:7897"
-               class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
-      </div>
-      <div class="grid gap-3 sm:grid-cols-2">
-        <div>
-          <label class="mb-2 block text-[11px] text-mute">哔咔账号（仅存内存，不落盘）</label>
-          <input x-model="settings.pica_account" type="text" placeholder="邮箱"
-                 class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
-        </div>
-        <div>
-          <label class="mb-2 block text-[11px] text-mute">哔咔密码（仅存内存）</label>
-          <input x-model="settings.pica_password" type="password" placeholder="留空则不修改"
-                 class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
-        </div>
       </div>
     </div>
 

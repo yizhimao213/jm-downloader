@@ -1,14 +1,14 @@
-# 禁漫采集台（多源）
+# 禁漫采集台
 
-一个自托管的漫画采集后台，支持三个数据源：禁漫天堂（jm）、绅士漫画（wnacg）、哔咔漫画（pica）。
+自托管的禁漫天堂（JM）采集后台：搜索 / 排行 / 作者页 → 批量下载 → 自动解密 → 上传影像馆建相册。
 后端 Python 标准库 HTTP 服务 + jmcomic，前端单页（Alpine + Tailwind）。
 
 ## 功能
 
-- 三源搜索 / 排行 / 作者页，按源切换筛选条件
+- 关键词检索、JM 号直查、热门排行、作者作品
 - 批量选择 → 后台任务下载 → 自动解密 → 上传影像馆建相册
 - 任务进度、失败重试（每张 3 轮）、日志逐条可见
-- 配置可通过网页「设置」修改并落盘（凭据不回显）
+- 配置可在网页「设置」修改并落盘（密码不回显）
 
 ## 本地运行
 
@@ -35,17 +35,12 @@ docker run -p 8899:8080 --env-file .env jm-downloader
 | `ADMIN_PASSWORD` | 影像馆后台密码 |
 | `TARGET_FOLDER` | 相册文件夹前缀，留空=用漫画名 |
 | `DOWNLOAD_THREAD` | 图片并发数，免费档建议 6 |
-| `PICA_ACCOUNT` / `PICA_PASSWORD` | 哔咔账号，留空则仅 jm + wnacg 可用 |
-| `SOURCE_PROXY` | wnacg/pica 代理，容器部署必须留空（境外出网直连） |
 
-## 部署（Cloudflare Containers）
-
-需 Workers Paid（$5/月），免费版不支持 Containers。
-配置见 `deploy/containers备用/`，容器 `enableInternet: true` 提供境外出网。
+免费档特性：512MB / 0.1 CPU、750 实例小时每月、15 分钟无请求休眠、冷启动约 47 秒、免费自定义域名。
 
 ## 环境变量覆盖
 
 `PORT` `MEDIA_API` `MEDIA_SITE` `ADMIN_PASSWORD` `TARGET_FOLDER` `CREATE_ALBUM`
-`JM_PROXY` `SOURCE_PROXY` `PICA_ACCOUNT` `PICA_PASSWORD` `DOWNLOAD_THREAD`
+`JM_PROXY` `JM_IMAGE_SUFFIX` `JM_CLIENT_IMPL` `DOWNLOAD_THREAD`
 
-环境变量优先级高于容器内 `config.json`；`config.json` 不随仓库分发。
+环境变量优先级高于容器内 `config.json`；`config.json` 含凭据，不随仓库分发。

@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY deploy/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py sources.py index.html ./
+COPY server.py index.html ./
 COPY assets ./assets
 RUN mkdir -p /app/.tmp
 

@@ -23,10 +23,3 @@ services:
       # 免费档 0.1 vCPU，线程数必须压低，否则下载解密阶段会被拖死
       - key: DOWNLOAD_THREAD
         value: "6"
-      # 容器在境外出网，source_proxy 必须为空
-      - key: SOURCE_PROXY
-        value: ""
-      - key: PICA_ACCOUNT
-        sync: false
-      - key: PICA_PASSWORD
-        sync: false
