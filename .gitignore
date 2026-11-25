@@ -1,0 +1,25 @@
+# 运行时产物
+.tmp/
+__pycache__/
+*.pyc
+node_modules/
+
+# 本机部署文件（迁云后不再需要）
+cloudflared.exe
+.tunnel_token
+deploy/*.log
+deploy/daemon.log
+deploy/server.out.log
+deploy/server.err.log
+deploy/tunnel.out.log
+deploy/tunnel.err.log
+deploy/t.err
+deploy/t.out
+
+# 含明文密码，绝不入库
+config.json
+config.json.tmp
+
+# 编辑器
+.vscode/
+.idea/

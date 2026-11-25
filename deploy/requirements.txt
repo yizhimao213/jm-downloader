@@ -1,0 +1,5 @@
+jmcomic==2.7.12
+curl-cffi==0.17.0
+pillow==13.0.0
+pycryptodome==4.6.0
+PyYAML==6.0.4

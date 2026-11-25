@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: jm-downloader
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/ping
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: MEDIA_API
+        sync: false
+      - key: MEDIA_SITE
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: TARGET_FOLDER
+        value: ""
+      - key: CREATE_ALBUM
+        value: "true"
+      # 免费档 0.1 vCPU，线程数必须压低，否则下载解密阶段会被拖死
+      - key: DOWNLOAD_THREAD
+        value: "6"
+      # 容器在境外出网，source_proxy 必须为空
+      - key: SOURCE_PROXY
+        value: ""
+      - key: PICA_ACCOUNT
+        sync: false
+      - key: PICA_PASSWORD
+        sync: false

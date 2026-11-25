@@ -1,0 +1,15 @@
+.tmp/
+__pycache__/
+*.pyc
+node_modules/
+backups/
+
+# 本机专用二进制与凭据，不进构建上下文
+cloudflared.exe
+.tunnel_token
+config.json
+config.json.tmp
+
+# deploy 目录只需 requirements.txt
+deploy/*
+!deploy/requirements.txt

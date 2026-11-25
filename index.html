@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JM Bridge · 采集控制台</title>
+
+<!-- 第三方组件全部本地化，不依赖公网 CDN -->
+<script src="/assets/tailwind.js"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink:'#0f0f0e', rail:'#131312', panel:'#181817', elev:'#20201d', line:'#2d2d29',
+          cream:'#f3f0ea', mute:'#a3a099', faint:'#6f6c65', acc:'#d97757', okc:'#788c5d'
+        },
+        fontFamily: {
+          sans:['"SF Pro Display"','"Segoe UI Variable"','"Segoe UI"','"PingFang SC"','"Microsoft YaHei"','sans-serif'],
+          mono:['ui-monospace','SFMono-Regular','Consolas','monospace']
+        },
+        boxShadow: {
+          lift:'0 18px 45px rgba(0,0,0,.38)',
+          accent:'0 10px 30px rgba(217,119,87,.18)'
+        },
+        transitionTimingFunction: { swift:'cubic-bezier(.16,1,.3,1)' }
+      }
+    }
+  };
+</script>
+<script src="/assets/lucide.js"></script>
+<script src="/assets/alpine.js" defer></script>
+<script>
+  async function api(path, opts = {}) {
+    const r = await fetch(path, opts);
+    return r.json();
+  }
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('jmApp', () => ({
+      cfg: {},
+      source: 'jm',
+      sourceName: '禁漫天堂',
+      view: 'search',
+      query: '',
+      page: 1,
+      total: 0,
+      isId: false,
+      rankType: 'hot',
+      rankPage: 1,
+      rankCategory: '0',
+      authorName: '',
+      authorPage: 1,
+      filters: { orders: [], times: [], categories: [], subCategories: {} },
+      filterOrder: 'mr',
+      filterTime: 'a',
+      filterCategory: '0',
+      filterSubCategory: '',
+      sourceOptions: [
+        { value:'jm', label:'禁漫天堂', desc:'JM 号 / 汉化本' },
+        { value:'wnacg', label:'绅士漫画', desc:'wnacg.com 汉化本' },
+        { value:'pica', label:'哔咔漫画', desc:'PicACG 需账号' }
+      ],
+      rankTabs: [
+        { value:'hot', label:'热门总榜', order:'mv', time:'a' },
+        { value:'day', label:'日榜', order:'mv', time:'t' },
+        { value:'week', label:'周榜', order:'mv', time:'w' },
+        { value:'month', label:'月榜', order:'mv', time:'m' },
+        { value:'latest', label:'最新上架', order:'mr', time:'a' }
+      ],
+      results: [],
+      selected: [],
+      jobs: [],
+      loading: false,
+      errMsg: '',
+      online: false,
+      settingsOpen: false,
+      polling: null,
+      toast: { show:false, msg:'', type:'' },
+      settings: {
+        media_api:'', media_password:'', target_folder:'',
+        create_album:true, jm_proxy:'', download_thread:16,
+        source_proxy:'', pica_account:'', pica_password:''
+      },
+
+      init() {
+        this.loadFilters();
+        this.loadConfig();
+        this.refreshJobs();
+        this.$nextTick(() => window.lucide && lucide.createIcons());
+      },
+      async loadFilters() {
+        try {
+          const d = await api('/api/filters');
+          this.filters = d;
+        } catch (e) { /* 使用默认空选项，页面仍可用 */ }
+      },
+      get categoryOptions() {
+        const map = this.filters.sourceCategories || {};
+        return map[this.source] || this.filters.categories || [];
+      },
+      get subCategoryOptions() {
+        const map = this.filters.subCategories || {};
+        return (map[this.filterCategory] || map['0'] || [{ value: '', label: '全部子分类' }]);
+      },
+      onCategoryChange() {
+        this.filterSubCategory = '';
+        this.resetPage();
+      },
+      resetFilters() {
+        this.filterOrder = 'mr';
+        this.filterTime = 'a';
+        this.filterCategory = '0';
+        this.filterSubCategory = '';
+        this.rankType = 'hot';
+        this.resetPage();
+      },
+      resetPage() {
+        if (this.view === 'rank') this.loadRank(1);
+        else if (this.view === 'author') this.loadAuthor(1);
+        else if (this.query.trim()) this.search(1);
+      },
+      filterQuery() {
+        return `order=${encodeURIComponent(this.filterOrder)}&time=${encodeURIComponent(this.filterTime)}&category=${encodeURIComponent(this.filterCategory)}&subCategory=${encodeURIComponent(this.filterSubCategory)}`;
+      },
+      applyPreset(t) {
+        this.rankType = t.value;
+        if (t.order) this.filterOrder = t.order;
+        if (t.time) this.filterTime = t.time;
+        this.rankPage = 1;
+        this.loadRank(1);
+      },
+
+      get selCount() { return this.selected.length; },
+
+      async loadConfig() {
+        try {
+          this.cfg = await api('/api/config');
+          Object.assign(this.settings, {
+            media_api: this.cfg.media_api || '',
+            target_folder: this.cfg.target_folder || '',
+            create_album: !!this.cfg.create_album,
+            jm_proxy: this.cfg.jm_proxy || '',
+            download_thread: this.cfg.download_thread || 16,
+            source_proxy: this.cfg.source_proxy || '',
+            pica_account: this.cfg.pica_account || '',
+            pica_password: ''
+          });
+          await this.ping();
+        } catch (e) { this.online = false; }
+      },
+      async ping() {
+        try {
+          await api('/api/ping');
+          this.online = true;
+        } catch (e) { this.online = false; }
+      },
+
+      switchSource(s) {
+        if (this.source === s) return;
+        this.source = s;
+        this.sourceName = (this.sourceOptions.find(x => x.value === s) || {}).label || s;
+        this.results = [];
+        this.selected = [];
+        this.errMsg = '';
+        this.resetFilters();
+        this.results = [];
+        if (s === 'pica' && !(this.cfg.pica_account || this.settings.pica_account)) {
+          this.notify('切换到哔咔漫画，请在设置里填写账号密码', 'err');
+        }
+        this.$nextTick(() => window.lucide && lucide.createIcons());
+      },
+      sourceQuery() {
+        return `source=${encodeURIComponent(this.source)}`;
+      },
+      switchView(v) {
+        this.view = v;
+        if (v === 'rank') {
+          this.loadRank();
+          this.$nextTick(() => document.getElementById('results')?.scrollIntoView({behavior:'smooth', block:'start'}));
+        } else if (v === 'author' && this.authorName) {
+          this.loadAuthor();
+          this.$nextTick(() => document.getElementById('results')?.scrollIntoView({behavior:'smooth', block:'start'}));
+        } else {
+          this.errMsg = '';
+          this.$nextTick(() => window.lucide && lucide.createIcons());
+        }
+      },
+      async loadRank(p) {
+        if (typeof p === 'number') this.rankPage = p;
+        this.view = 'rank';
+        this.loading = true;
+        this.errMsg = '';
+        try {
+          const d = await api(`/api/ranking?type=${encodeURIComponent(this.rankType)}&page=${this.rankPage}&${this.sourceQuery()}&${this.filterQuery()}`);
+          if (d.error) throw new Error(d.error);
+          this.results = d.results || [];
+          this.total = d.total || 0;
+          this.isId = false;
+          this.selected = [];
+          this.$nextTick(() => window.lucide && lucide.createIcons());
+        } catch (e) {
+          this.errMsg = e.message || '排行加载失败';
+          this.results = [];
+        } finally { this.loading = false; }
+      },
+      async loadAuthor(p) {
+        if (typeof p === 'number') this.authorPage = p;
+        if (!this.authorName) return;
+        this.view = 'author';
+        this.loading = true;
+        this.errMsg = '';
+        try {
+          const d = await api(`/api/author?author=${encodeURIComponent(this.authorName)}&page=${this.authorPage}&${this.sourceQuery()}&${this.filterQuery()}`);
+          if (d.error) throw new Error(d.error);
+          this.results = d.results || [];
+          this.total = d.total || 0;
+          this.isId = false;
+          this.selected = [];
+          this.$nextTick(() => window.lucide && lucide.createIcons());
+        } catch (e) {
+          this.errMsg = e.message || '作者作品加载失败';
+          this.results = [];
+        } finally { this.loading = false; }
+      },
+      searchAuthor(name) {
+        name = String(name || '').trim();
+        if (!name) return;
+        this.authorName = name;
+        this.authorPage = 1;
+        this.query = name;
+        this.loadAuthor(1);
+        this.$nextTick(() => document.getElementById('results')?.scrollIntoView({behavior:'smooth', block:'start'}));
+      },
+      prev() {
+        if (this.view === 'rank') this.loadRank(Math.max(1, this.rankPage - 1));
+        else if (this.view === 'author') this.loadAuthor(Math.max(1, this.authorPage - 1));
+        else this.search(Math.max(1, this.page - 1));
+      },
+      next() {
+        if (this.view === 'rank') this.loadRank(this.rankPage + 1);
+        else if (this.view === 'author') this.loadAuthor(this.authorPage + 1);
+        else this.search(this.page + 1);
+      },
+
+      async search(p) {
+        const q = this.query.trim();
+        if (!q) { this.notify('请输入关键词或 JM 号', 'err'); return; }
+        this.view = 'search';
+        this.page = p;
+        this.loading = true;
+        this.errMsg = '';
+        try {
+          const d = await api(`/api/search?q=${encodeURIComponent(q)}&page=${p}&${this.sourceQuery()}&${this.filterQuery()}`);
+          if (d.error) throw new Error(d.error);
+          this.results = d.results || [];
+          this.total = d.total || 0;
+          this.isId = !!d.is_id;
+          this.selected = [];
+          if (this.results.length) {
+            this.$nextTick(() => window.lucide && lucide.createIcons());
+          }
+        } catch (e) {
+          this.errMsg = e.message || '搜索失败';
+          this.results = [];
+        } finally { this.loading = false; }
+      },
+
+      isSelected(id) { return this.selected.indexOf(String(id)) >= 0; },
+      toggle(id) {
+        id = String(id);
+        const i = this.selected.indexOf(id);
+        if (i >= 0) this.selected.splice(i, 1); else this.selected.push(id);
+      },
+      selectAll(on) {
+        this.selected = on ? this.results.map(r => String(r.id)) : [];
+      },
+
+      async download() {
+        const ids = this.selected.slice();
+        if (!ids.length) return;
+        const d = await api('/api/download', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ ids, source: this.source })
+        });
+        if (d.error) { this.notify(d.error, 'err'); return; }
+        this.notify(`已提交 ${d.jobs.length} 个采集任务`, 'ok');
+        this.selected = [];
+        this.refreshJobs();
+        this.startPolling();
+        this.$nextTick(() => document.getElementById('jobs')?.scrollIntoView({behavior:'smooth', block:'start'}));
+      },
+
+      async refreshJobs() {
+        try {
+          const d = await api('/api/jobs');
+          this.jobs = (d.jobs || []).map(j => Object.assign({ expanded:false }, j));
+          this.$nextTick(() => window.lucide && lucide.createIcons());
+        } catch (e) { /* ignore */ }
+      },
+      startPolling() {
+        if (this.polling) return;
+        this.polling = setInterval(async () => {
+          await this.refreshJobs();
+          if (!this.jobs.some(j => ['queued','running'].includes(j.status))) {
+            clearInterval(this.polling); this.polling = null;
+          }
+        }, 1500);
+      },
+      async clearJobs() {
+        await api('/api/clear-jobs', { method:'POST' });
+        this.jobs = [];
+      },
+      statusLabel(s) {
+        return {queued:'排队中', running:'采集中', done:'已完成', error:'失败'}[s] || s;
+      },
+      progress(j) {
+        return j.total ? Math.round(j.done / j.total * 100) : (j.status === 'done' ? 100 : 0);
+      },
+
+      openSettings() {
+        this.settings.media_password = '';
+        this.settings.pica_password = '';
+        this.settingsOpen = true;
+        this.$nextTick(() => window.lucide && lucide.createIcons());
+      },
+      async saveSettings() {
+        const s = Object.assign({}, this.settings);
+        const d = await api('/api/config', {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s)
+        });
+        if (d.error) { this.notify(d.error, 'err'); return; }
+        this.settingsOpen = false;
+        this.notify('设置已保存', 'ok');
+        this.loadConfig();
+      },
+      async testLogin() {
+        await api('/api/config', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(Object.assign({}, this.settings))
+        });
+        const d = await api('/api/login-test', { method:'POST' });
+        this.notify(d.ok ? d.msg : ('失败：' + d.error), d.ok ? 'ok' : 'err');
+      },
+
+      notify(msg, type = '') {
+        this.toast = { show:true, msg, type };
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => { this.toast.show = false; }, 3000);
+      }
+    }));
+  });
+</script>
+
+<style>
+  html { scroll-behavior:smooth }
+  body { background:
+      radial-gradient(900px 520px at 88% -12%, rgba(217,119,87,.10), transparent 62%),
+      radial-gradient(760px 520px at -12% 26%, rgba(120,140,93,.06), transparent 62%),
+      #0f0f0e; }
+  ::selection { background:rgba(217,119,87,.28); color:#f3f0ea }
+  ::-webkit-scrollbar { width:9px; height:9px }
+  ::-webkit-scrollbar-track { background:#131312 }
+  ::-webkit-scrollbar-thumb { background:#35352f; border-radius:9px; border:2px solid #131312 }
+
+  .page-bg { background:radial-gradient(1200px 500px at 50% -10%, rgba(217,119,87,.06), transparent 70%) }
+  .glass { background:rgba(24,24,23,.78); backdrop-filter:blur(14px) }
+  .card { border:1px solid #2d2d29; background:#181817; transition:transform .3s cubic-bezier(.16,1,.3,1),border-color .2s,box-shadow .3s cubic-bezier(.16,1,.3,1) }
+  .card:hover { transform:translateY(-4px); border-color:#4b4b43; box-shadow:0 18px 45px rgba(0,0,0,.38) }
+  .card.sel { border-color:#d97757; box-shadow:0 0 0 1px #d97757, 0 14px 34px rgba(217,119,87,.14) }
+  .clamp2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden }
+  .spotlight:after { content:""; position:absolute; inset:0; pointer-events:none; opacity:0; transition:opacity .3s;
+      background:radial-gradient(280px circle at 50% 0%, rgba(255,255,255,.07), transparent 60%) }
+  .spotlight:hover:after { opacity:1 }
+
+  .badge { font-size:10px; letter-spacing:.02em; padding:4px 10px; border-radius:999px; border:1px solid #2d2d29; background:#20201d; color:#a3a099; white-space:nowrap }
+  .badge.queued { background:rgba(201,162,39,.10); color:#d8bd6e; border-color:rgba(201,162,39,.28) }
+  .badge.running { background:rgba(120,140,93,.12); color:#a7bd8d; border-color:rgba(120,140,93,.32) }
+  .badge.done { background:rgba(120,140,93,.16); color:#b6cda0; border-color:rgba(120,140,93,.38) }
+  .badge.error { background:rgba(200,96,92,.12); color:#e39490; border-color:rgba(200,96,92,.32) }
+
+  .skel { background:linear-gradient(100deg,#181817 30%,#242421 50%,#181817 70%); background-size:220% 100%; animation:shimmer 1.5s linear infinite }
+  @keyframes shimmer { to { background-position:-220% 0 } }
+  .pulse-dot { animation:pulseDot 2s ease-in-out infinite }
+  @keyframes pulseDot { 0%,100%{opacity:1} 50%{opacity:.35} }
+  @media (prefers-reduced-motion:reduce) {
+    *,*:before,*:after { animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; scroll-behavior:auto!important }
+  }
+</style>
+</head>
+
+<body class="font-sans text-cream antialiased" x-data="jmApp">
+<div class="flex min-h-dvh page-bg">
+
+  <!-- 侧栏 -->
+  <aside class="sticky top-0 hidden h-dvh w-[238px] shrink-0 flex-col border-r border-line bg-rail px-5 py-7 lg:flex">
+    <div class="flex items-center gap-3 px-2">
+      <div class="grid size-10 place-items-center rounded-xl border border-acc/40 bg-acc/10 text-acc">
+        <i data-lucide="layers-3" class="size-5"></i>
+      </div>
+      <div>
+        <div class="text-[14px] font-semibold tracking-tight">JM Bridge</div>
+        <div class="mt-0.5 text-[9px] uppercase tracking-[.2em] text-faint">Collect / Archive</div>
+      </div>
+    </div>
+
+    <nav class="mt-10 flex flex-col gap-1.5">
+      <button @click="switchView('search')" class="group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-[13px] transition-colors"
+              :class="view === 'search' ? 'bg-acc/10 text-acc' : 'text-mute hover:bg-white/5 hover:text-cream'">
+        <i data-lucide="compass" class="size-[17px]"></i>采集台
+      </button>
+      <button @click="switchView('rank')" class="group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-[13px] transition-colors"
+              :class="view === 'rank' ? 'bg-acc/10 text-acc' : 'text-mute hover:bg-white/5 hover:text-cream'">
+        <i data-lucide="chart-no-axes-column-increasing" class="size-[17px]"></i>热门排行
+      </button>
+      <a href="#jobs" class="group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-[13px] text-mute transition-colors hover:bg-white/5 hover:text-cream">
+        <i data-lucide="list-filter" class="size-[17px]"></i>任务队列
+      </a>
+      <button @click="openSettings()" class="group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-[13px] text-mute transition-colors hover:bg-white/5 hover:text-cream">
+        <i data-lucide="sliders-horizontal" class="size-[17px]"></i>连接设置
+      </button>
+    </nav>
+
+    <div class="mt-7">
+      <div class="px-3.5 text-[9px] font-semibold uppercase tracking-[.18em] text-faint">数据来源</div>
+      <div class="mt-2 flex flex-col gap-1">
+        <template x-for="s in sourceOptions" :key="s.value">
+          <button @click="switchSource(s.value)"
+                  class="flex items-center justify-between rounded-lg px-3.5 py-2 text-left text-[12px] transition-colors"
+                  :class="source === s.value ? 'bg-white/[.07] text-cream' : 'text-mute hover:bg-white/5'">
+            <span class="flex items-center gap-2.5">
+              <span class="size-1.5 rounded-full" :class="source === s.value ? 'bg-acc' : 'bg-line'"></span>
+              <span x-text="s.label"></span>
+            </span>
+            <i x-show="source === s.value" data-lucide="check" class="size-3.5 text-acc"></i>
+          </button>
+        </template>
+      </div>
+    </div>
+
+    <div class="mt-auto border-t border-line px-2 pt-5">
+      <div class="flex items-center gap-2.5 text-[11px] text-mute">
+        <span class="size-2 rounded-full" :class="online ? 'bg-okc shadow-[0_0_0_4px_rgba(120,140,93,.13)]' : 'bg-red-400 pulse-dot'"></span>
+        <span class="truncate" x-text="online ? '服务在线' : '服务离线'"></span>
+      </div>
+      <div class="mt-2 text-[10px] leading-relaxed text-faint" x-text="cfg.media_site || 'PRIVATE LIBRARY'"></div>
+      <div class="mt-4 text-[9px] uppercase tracking-[.16em] text-faint">© 2026 · Local Edge</div>
+    </div>
+  </aside>
+
+  <!-- 主体 -->
+  <main class="min-w-0 flex-1">
+    <!-- 移动端顶栏 -->
+    <div class="sticky top-0 z-30 flex items-center justify-between border-b border-line bg-ink/90 px-5 py-3 backdrop-blur lg:hidden">
+      <div class="flex items-center gap-2.5">
+        <div class="grid size-8 place-items-center rounded-lg bg-acc/10 text-acc"><i data-lucide="layers-3" class="size-4"></i></div>
+        <span class="text-[13px] font-semibold">JM Bridge</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="size-2 rounded-full" :class="online ? 'bg-okc' : 'bg-red-400'"></span>
+        <button @click="openSettings()" class="text-mute"><i data-lucide="sliders-horizontal" class="size-5"></i></button>
+      </div>
+    </div>
+
+    <div class="mx-auto max-w-[1240px] px-5 pb-28 pt-9 sm:px-8 lg:px-12 lg:pt-14">
+
+      <!-- Hero：非对称分栏 -->
+      <section id="search" class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-end">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-acc">
+            <span class="h-px w-7 bg-acc/60"></span> Private Archive / Ingest
+          </div>
+          <h1 class="mt-4 text-[34px] font-semibold leading-[1.12] tracking-[-.04em] sm:text-[44px]">
+            把想看的，<br><span class="text-mute">收进影像馆。</span>
+          </h1>
+          <p class="mt-4 max-w-[58ch] text-[13px] leading-relaxed text-mute">
+            搜索关键词或 JM 号，勾选后一键采集归档。每本漫画独立文件夹，按「JM号 - 作者 - 漫画名」命名，仅后台可见。
+          </p>
+
+          <!-- 检索条 -->
+          <form @submit.prevent="search(1)" class="mt-8 flex items-center gap-2 rounded-2xl border border-line bg-panel/90 p-2 shadow-lift backdrop-blur transition-all duration-200 focus-within:border-acc/50 focus-within:shadow-accent">
+            <i data-lucide="search" class="ml-3 size-[18px] shrink-0 text-faint"></i>
+            <input x-model="query" type="text" autocomplete="off"
+                   placeholder="输入关键词，或直接粘贴 JM 号…"
+                   class="min-w-0 flex-1 bg-transparent py-3 text-[14px] text-cream outline-none placeholder:text-faint">
+            <kbd class="mr-1 hidden rounded-md border border-line px-2 py-1 font-mono text-[9px] text-faint sm:block">ENTER</kbd>
+            <button type="submit" :disabled="loading"
+                    class="flex shrink-0 items-center gap-2 rounded-xl bg-acc px-4 py-3 text-[12px] font-semibold text-ink transition-transform duration-200 hover:brightness-105 active:scale-[.98] disabled:opacity-50">
+              <span x-text="loading ? '检索中' : '开始检索'"></span>
+              <i data-lucide="arrow-up-right" class="size-4"></i>
+            </button>
+          </form>
+          <div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-faint">
+            <span><span class="text-acc">关键词</span> / <span class="text-acc">JM号</span> 双模式检索</span>
+            <span class="text-line">/</span>
+            <span>多选批量采集</span>
+            <span class="text-line">/</span>
+            <span>自动写入影像馆</span>
+            <span class="text-line">/</span>
+            <span><span class="text-acc">热门 / 日周月榜</span>一键浏览</span>
+          </div>
+        </div>
+
+        <!-- 统计 bento -->
+        <div class="grid grid-cols-2 gap-3 lg:grid-cols-1">
+          <div class="rounded-2xl border border-line bg-panel/70 p-4">
+            <div class="flex items-center justify-between">
+              <span class="text-[10px] uppercase tracking-[.14em] text-faint">Service</span>
+              <i data-lucide="activity" class="size-4 text-faint"></i>
+            </div>
+            <div class="mt-3 flex items-center gap-2 text-[15px] font-medium" :class="online ? 'text-okc' : 'text-red-300'">
+              <span class="size-1.5 rounded-full" :class="online ? 'bg-okc' : 'bg-red-400 pulse-dot'"></span>
+              <span x-text="online ? '运行正常' : '连接中断'"></span>
+            </div>
+            <div class="mt-1 text-[10px] text-faint" x-text="cfg.media_api || '未配置 API'"></div>
+          </div>
+          <div class="rounded-2xl border border-line bg-panel/70 p-4">
+            <div class="flex items-center justify-between">
+              <span class="text-[10px] uppercase tracking-[.14em] text-faint">Selection</span>
+              <i data-lucide="mouse-pointer-check" class="size-4 text-faint"></i>
+            </div>
+            <div class="mt-3 text-[26px] font-semibold leading-none tracking-tight tabular-nums" x-text="selCount"></div>
+            <div class="mt-2 text-[10px] text-faint">本已选中，等待归档</div>
+          </div>
+          <div class="col-span-2 rounded-2xl border border-acc/25 bg-acc/[.07] p-4 lg:col-span-1">
+            <div class="flex items-center justify-between">
+              <span class="text-[10px] uppercase tracking-[.14em] text-acc/80">Destination</span>
+              <i data-lucide="database" class="size-4 text-acc/80"></i>
+            </div>
+            <div class="mt-3 text-[14px] font-medium">影像馆 · 私有库</div>
+            <div class="mt-1 text-[10px] text-mute" x-text="cfg.has_password ? '后台凭据已就绪' : '请在设置中填写密码'"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 结果区 -->
+      <section class="mt-14">
+        <!-- 数据来源快捷切换（移动端可用） -->
+        <div class="mb-5 flex flex-wrap items-center gap-2">
+          <span class="mr-1 text-[10px] uppercase tracking-[.14em] text-faint">来源</span>
+          <template x-for="s in sourceOptions" :key="s.value">
+            <button @click="switchSource(s.value)"
+                    class="rounded-full border px-3.5 py-1.5 text-[11px] transition-colors"
+                    :class="source === s.value ? 'border-acc bg-acc text-ink font-semibold' : 'border-line bg-elev text-mute hover:text-cream'"
+                    x-text="s.label"></button>
+          </template>
+        </div>
+        <div class="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-4">
+          <div>
+            <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.18em] text-faint"
+                 x-text="view === 'rank' ? 'Discover / Ranking' : view === 'author' ? 'Author Works' : 'Search Results'"></div>
+            <h2 class="mt-1.5 text-[19px] font-semibold tracking-tight"
+                x-text="view === 'rank' ? '热门排行' : view === 'author' ? authorName + ' 的作品' : '检索结果'"></h2>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button x-show="view === 'author'" @click="switchView('search')" class="rounded-lg border border-acc/50 bg-acc/10 px-3 py-2 text-[11px] text-acc transition-colors">
+              <i data-lucide="arrow-left" class="mr-1.5 inline size-3.5"></i>返回检索
+            </button>
+            <button @click="switchView('search')" class="rounded-lg border px-3 py-2 text-[11px] transition-colors"
+                    :class="view === 'search' ? 'border-acc/50 bg-acc/10 text-acc' : 'border-line bg-elev text-mute hover:text-cream'">
+              <i data-lucide="search" class="mr-1.5 inline size-3.5"></i>关键词检索
+            </button>
+            <button @click="switchView('rank')" class="rounded-lg border px-3 py-2 text-[11px] transition-colors"
+                    :class="view === 'rank' ? 'border-acc/50 bg-acc/10 text-acc' : 'border-line bg-elev text-mute hover:text-cream'">
+              <i data-lucide="chart-no-axes-column-increasing" class="mr-1.5 inline size-3.5"></i>热门排行
+            </button>
+          </div>
+          <div x-show="results.length || selected.length" class="flex flex-wrap items-center gap-2">
+            <span class="mr-1 text-[12px] text-mute">已选 <b class="font-semibold text-acc" x-text="selCount"></b> 项</span>
+            <button @click="selectAll(true)" class="rounded-lg border border-line bg-elev px-3 py-2 text-[11px] text-mute transition-colors hover:text-cream">全选</button>
+            <button @click="selectAll(false)" class="rounded-lg border border-line bg-elev px-3 py-2 text-[11px] text-mute transition-colors hover:text-cream">清空</button>
+            <button @click="download()" :disabled="!selCount"
+                    class="flex items-center gap-2 rounded-lg bg-acc px-3.5 py-2 text-[11px] font-semibold text-ink transition-transform hover:brightness-105 active:scale-[.98] disabled:opacity-40">
+              <i data-lucide="download" class="size-3.5"></i>采集到影像馆
+            </button>
+          </div>
+        </div>
+
+        <!-- 榜单预设 -->
+        <div x-show="view === 'rank'" class="mt-5 flex flex-wrap items-center gap-2" x-transition.opacity.duration.200ms>
+          <template x-for="t in rankTabs" :key="t.value">
+            <button @click="applyPreset(t)"
+                    class="rounded-full border px-3.5 py-1.5 text-[11px] transition-colors"
+                    :class="rankType === t.value ? 'border-acc bg-acc text-ink font-semibold' : 'border-line bg-elev text-mute hover:text-cream'"
+                    x-text="t.label"></button>
+          </template>
+        </div>
+
+        <!-- 通用筛选：检索 / 排行 / 作者作品共用 -->
+        <div class="mt-4 rounded-2xl border border-line bg-panel/60 p-3.5" x-transition.opacity.duration.200ms>
+          <div class="flex flex-wrap items-center gap-2.5">
+            <div class="flex items-center gap-2 pr-1 text-[10px] font-semibold uppercase tracking-[.16em] text-faint">
+              <i data-lucide="sliders-horizontal" class="size-3.5"></i>筛选
+            </div>
+            <label class="flex items-center gap-2 text-[11px] text-faint">
+              排序
+              <select x-model="filterOrder" @change="resetPage()"
+                      class="rounded-lg border border-line bg-elev px-2.5 py-1.5 text-[11px] text-cream outline-none focus:border-acc/50">
+                <template x-for="o in filters.orders" :key="o.value">
+                  <option :value="o.value" x-text="o.label"></option>
+                </template>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-faint">
+              时间
+              <select x-model="filterTime" @change="resetPage()"
+                      class="rounded-lg border border-line bg-elev px-2.5 py-1.5 text-[11px] text-cream outline-none focus:border-acc/50">
+                <template x-for="t in filters.times" :key="t.value">
+                  <option :value="t.value" x-text="t.label"></option>
+                </template>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-faint">
+              分类
+              <select x-model="filterCategory" @change="onCategoryChange()"
+                      class="rounded-lg border border-line bg-elev px-2.5 py-1.5 text-[11px] text-cream outline-none focus:border-acc/50">
+                <template x-for="c in categoryOptions" :key="c.value">
+                  <option :value="c.value" x-text="c.label"></option>
+                </template>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-faint">
+              子分类
+              <select x-model="filterSubCategory" @change="resetPage()"
+                      class="rounded-lg border border-line bg-elev px-2.5 py-1.5 text-[11px] text-cream outline-none focus:border-acc/50">
+                <template x-for="s in subCategoryOptions" :key="s.value">
+                  <option :value="s.value" x-text="s.label"></option>
+                </template>
+              </select>
+            </label>
+            <button @click="resetFilters()"
+                    class="ml-auto flex items-center gap-1.5 rounded-lg border border-line bg-elev px-2.5 py-1.5 text-[11px] text-mute transition-colors hover:text-cream">
+              <i data-lucide="rotate-ccw" class="size-3.5"></i>重置
+            </button>
+          </div>
+        </div>
+
+        <!-- 加载骨架 -->
+        <template x-if="loading">
+          <div class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
+            <template x-for="n in 8" :key="n">
+              <div class="skel aspect-[3/4] rounded-2xl"></div>
+            </template>
+          </div>
+        </template>
+
+        <!-- 空 / 错误 -->
+        <template x-if="!loading && !results.length">
+          <div class="mt-6 flex min-h-[280px] flex-col items-center justify-center rounded-2xl border border-dashed border-line text-center">
+            <template x-if="errMsg">
+              <div>
+                <div class="mx-auto grid size-12 place-items-center rounded-xl bg-red-400/10 text-red-300"><i data-lucide="triangle-alert" class="size-5"></i></div>
+                <div class="mt-4 text-[14px]">检索失败</div>
+                <div class="mx-auto mt-2 max-w-[42ch] text-[11px] text-faint" x-text="errMsg"></div>
+              </div>
+            </template>
+            <template x-if="!errMsg">
+              <div>
+                <div class="mx-auto grid size-12 place-items-center rounded-xl bg-elev text-faint"><i data-lucide="scan-search" class="size-5"></i></div>
+                <div class="mt-4 text-[14px]" x-text="view === 'rank' ? '榜单暂时为空' : '还没有检索结果'"></div>
+                <div class="mt-2 text-[11px] text-faint" x-text="view === 'rank' ? '换个分类或稍后重试' : '在上方输入关键词或 JM 号，开始你的采集'"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- 卡片网格 -->
+        <template x-if="!loading && results.length">
+          <div>
+            <div class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
+              <template x-for="item in results" :key="item.id">
+                <article @click="toggle(item.id)"
+                         class="card spotlight group relative cursor-pointer overflow-hidden rounded-2xl"
+                         :class="isSelected(item.id) ? 'sel' : ''">
+                  <div class="relative aspect-[3/4] overflow-hidden bg-elev">
+                    <div class="absolute inset-0 grid place-items-center font-mono text-[11px] tracking-wider text-faint" x-text="'JM ' + item.id"></div>
+                    <img :src="item.cover" loading="lazy" alt=""
+                         class="absolute inset-0 h-full w-full object-cover opacity-0 transition-all duration-500 group-hover:scale-[1.04]"
+                         @load="$el.classList.remove('opacity-0')" @error="$el.remove()">
+                    <div class="pointer-events-none absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/65 to-transparent"></div>
+                    <div class="absolute left-3 top-3 grid size-6 place-items-center rounded-lg border border-white/25 bg-black/45 text-ink backdrop-blur transition-colors"
+                         :class="isSelected(item.id) ? '!border-acc !bg-acc' : ''">
+                      <i data-lucide="check" class="size-3.5" :class="isSelected(item.id) ? '' : 'opacity-0'"></i>
+                    </div>
+                    <span class="absolute right-3 top-3 rounded-md border border-white/10 bg-black/45 px-2 py-0.5 font-mono text-[10px] text-white/80 backdrop-blur"
+                          x-text="'JM ' + item.id"></span>
+                  </div>
+                  <div class="p-3.5">
+                    <h3 class="clamp2 h-[38px] text-[12.5px] leading-[1.42]" x-text="item.title"></h3>
+                    <div class="mt-2 flex items-center justify-between gap-2 text-[10.5px]">
+                      <template x-if="(item.authors && item.authors.length) || item.author">
+                        <div class="flex min-w-0 items-center gap-1.5 overflow-hidden">
+                          <template x-for="a in (item.authors && item.authors.length ? item.authors : [item.author])" :key="a">
+                            <button @click.stop="searchAuthor(a)" :title="'查看 ' + a + ' 的作品'"
+                                    class="max-w-full truncate rounded-md bg-acc/10 px-1.5 py-0.5 text-acc transition-colors hover:bg-acc/20"
+                                    x-text="a"></button>
+                          </template>
+                        </div>
+                      </template>
+                      <template x-if="!((item.authors && item.authors.length) || item.author)">
+                        <span class="truncate text-faint">未知作者</span>
+                      </template>
+                      <span class="shrink-0 text-faint" x-text="item.pages ? item.pages + ' P' : ''"></span>
+                    </div>
+                  </div>
+                </article>
+              </template>
+            </div>
+
+            <div x-show="!isId" class="mt-8 flex items-center justify-center gap-3 text-[11px] text-mute">
+              <button @click="prev()" :disabled="view === 'rank' ? rankPage <= 1 : view === 'author' ? authorPage <= 1 : page <= 1"
+                      class="rounded-lg border border-line bg-elev px-3.5 py-2 transition-colors hover:text-cream disabled:opacity-40">上一页</button>
+              <span class="tabular-nums" x-text="'第 ' + (view === 'rank' ? rankPage : view === 'author' ? authorPage : page) + ' 页 · 共 ' + total + ' 条'"></span>
+              <button @click="next()"
+                      class="rounded-lg border border-line bg-elev px-3.5 py-2 transition-colors hover:text-cream">下一页</button>
+            </div>
+          </div>
+        </template>
+      </section>
+
+      <!-- 任务 -->
+      <section id="jobs" class="mt-16 scroll-mt-6">
+        <div class="flex items-end justify-between border-b border-line pb-4">
+          <div>
+            <div class="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.18em] text-faint">Transfer Queue</div>
+            <h2 class="mt-1.5 text-[19px] font-semibold tracking-tight">采集任务</h2>
+          </div>
+          <button @click="clearJobs()" class="rounded-lg border border-line bg-elev px-3 py-2 text-[11px] text-mute transition-colors hover:text-cream">清除记录</button>
+        </div>
+
+        <template x-if="!jobs.length">
+          <div class="mt-5 flex min-h-[160px] flex-col items-center justify-center rounded-2xl border border-dashed border-line text-center">
+            <i data-lucide="inbox" class="size-6 text-faint"></i>
+            <div class="mt-3 text-[13px] text-mute">暂无任务</div>
+            <div class="mt-1 text-[10.5px] text-faint">提交采集后，进度会显示在这里</div>
+          </div>
+        </template>
+
+        <div class="mt-4 space-y-3">
+          <template x-for="job in jobs" :key="job.id">
+            <article class="rounded-2xl border border-line bg-panel p-4 sm:p-5">
+              <div class="flex items-center gap-3">
+                <span class="badge" :class="job.status" x-text="statusLabel(job.status)"></span>
+                <span class="min-w-0 flex-1 truncate text-[13px]" x-text="job.comic_name || job.title || ('JM' + job.jm_id)"></span>
+                <span class="hidden shrink-0 font-mono text-[10px] text-faint sm:block" x-text="job.phase || ''"></span>
+                <button @click="job.expanded = !job.expanded" class="shrink-0 text-faint transition-colors hover:text-cream">
+                  <i data-lucide="chevron-down" class="size-4 transition-transform duration-200" :class="job.expanded ? 'rotate-180' : ''"></i>
+                </button>
+              </div>
+              <div class="mt-3.5 h-1 overflow-hidden rounded-full bg-elev">
+                <div class="h-full rounded-full bg-acc transition-all duration-500 ease-swift" :style="`width:${progress(job)}%`"></div>
+              </div>
+              <div class="mt-2 flex justify-between font-mono text-[10px] text-faint">
+                <span x-text="job.total ? job.done + ' / ' + job.total + ' 张' : '等待中'"></span>
+                <span x-text="progress(job) + '%'"></span>
+              </div>
+              <div x-show="job.missing > 0" class="mt-2 flex items-center gap-1.5 text-[10px] text-amber-300/90">
+                <i data-lucide="triangle-alert" class="size-3"></i>
+                <span x-text="'补齐后仍缺 ' + job.missing + ' 张，已上传其余页面'"></span>
+              </div>
+              <div x-show="job.expanded" class="mt-3 rounded-xl border border-line bg-elev/60 p-3 font-mono text-[10px] leading-relaxed text-faint">
+                <div class="max-h-28 overflow-auto">
+                  <div x-for="line in (job.logs || [])" :key="line" class="truncate" x-text="line"></div>
+                </div>
+                <div x-show="job.error" class="mt-2 text-red-300" x-text="job.error"></div>
+              </div>
+            </article>
+          </template>
+        </div>
+      </section>
+
+      <footer class="mt-20 border-t border-line pt-6 text-[10px] text-faint">
+        JM Bridge · 本地边缘采集 · 数据写入私有影像馆
+      </footer>
+    </div>
+  </main>
+</div>
+
+<!-- 选中悬浮操作栏 -->
+<div x-show="selCount > 0" x-transition:enter="transition duration-300 ease-out" x-transition:enter-start="opacity-0 translate-y-4" x-transition:enter-end="opacity-100 translate-y-0"
+     class="fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
+  <div class="flex w-full max-w-md items-center gap-3 rounded-2xl border border-acc/30 bg-elev/95 p-2.5 shadow-lift backdrop-blur">
+    <div class="ml-2 grid size-9 place-items-center rounded-xl bg-acc/10 text-acc"><i data-lucide="layers-3" class="size-4"></i></div>
+    <div class="min-w-0 flex-1">
+      <div class="text-[12px] font-medium">已选择 <span x-text="selCount" class="text-acc"></span> 本漫画</div>
+      <div class="truncate text-[10px] text-faint">将按 JM号 - 作者 - 漫画名 建立独立文件夹</div>
+    </div>
+    <button @click="download()" class="flex items-center gap-2 rounded-xl bg-acc px-4 py-2.5 text-[11px] font-semibold text-ink transition-transform active:scale-[.98]">
+      <i data-lucide="download" class="size-3.5"></i>开始采集
+    </button>
+  </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div x-show="settingsOpen" x-transition.opacity.duration.200ms
+     class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" @click.self="settingsOpen=false">
+  <div class="max-h-[88dvh] w-full max-w-lg overflow-auto rounded-3xl border border-line bg-elev p-6 shadow-lift sm:p-7" @click.stop>
+    <div class="flex items-start justify-between">
+      <div>
+        <h3 class="text-[18px] font-semibold tracking-tight">连接设置</h3>
+        <p class="mt-1.5 text-[11px] text-faint">配置影像馆写入目标与采集行为，密码仅保留在当前运行内存中。</p>
+      </div>
+      <button @click="settingsOpen=false" class="text-faint transition-colors hover:text-cream"><i data-lucide="x" class="size-5"></i></button>
+    </div>
+
+    <div class="mt-7 space-y-5">
+      <div>
+        <label class="mb-2 block text-[11px] text-mute">影像馆后台 API 地址</label>
+        <input x-model="settings.media_api" type="text" class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[13px] text-cream outline-none transition-colors focus:border-acc/50">
+      </div>
+      <div>
+        <label class="mb-2 block text-[11px] text-mute">影像馆后台密码</label>
+        <input x-model="settings.media_password" type="password" placeholder="留空则不修改"
+               class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[13px] text-cream outline-none transition-colors focus:border-acc/50">
+        <div class="mt-1.5 text-[10px] text-faint">只在内存中使用，不写入配置文件</div>
+      </div>
+      <div class="h-px bg-line"></div>
+      <div class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="mb-2 block text-[11px] text-mute">文件夹前缀（可选）</label>
+          <input x-model="settings.target_folder" type="text" placeholder="留空直接用 JM号 - 作者 - 漫画名"
+                 class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
+        </div>
+        <div>
+          <label class="mb-2 block text-[11px] text-mute">图片并发数</label>
+          <input x-model.number="settings.download_thread" type="number" min="1" max="32"
+                 class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
+        </div>
+      </div>
+      <label class="flex items-center justify-between rounded-xl border border-line bg-ink px-3.5 py-3">
+        <span class="text-[12px]">为每个本子建相册</span>
+        <input x-model="settings.create_album" type="checkbox" class="size-4 accent-[#d97757]">
+      </label>
+      <div>
+        <label class="mb-2 block text-[11px] text-mute">jmcomic 代理（留空 = 用系统环境代理）</label>
+        <input x-model="settings.jm_proxy" type="text" placeholder="http://127.0.0.1:7890"
+               class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
+      </div>
+      <div>
+        <label class="mb-2 block text-[11px] text-mute">绅士漫画 / 哔咔代理（留空 = 直连；本机部署填 http://127.0.0.1:7897）</label>
+        <input x-model="settings.source_proxy" type="text" placeholder="http://127.0.0.1:7897"
+               class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
+      </div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-2 block text-[11px] text-mute">哔咔账号（仅存内存，不落盘）</label>
+          <input x-model="settings.pica_account" type="text" placeholder="邮箱"
+                 class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
+        </div>
+        <div>
+          <label class="mb-2 block text-[11px] text-mute">哔咔密码（仅存内存）</label>
+          <input x-model="settings.pica_password" type="password" placeholder="留空则不修改"
+                 class="w-full rounded-xl border border-line bg-ink px-3.5 py-2.5 text-[12px] text-cream outline-none transition-colors focus:border-acc/50">
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-8 flex justify-end gap-2.5">
+      <button @click="testLogin()" class="rounded-xl border border-line bg-panel px-4 py-2.5 text-[11px] text-mute transition-colors hover:text-cream">测试登录</button>
+      <button @click="settingsOpen=false" class="rounded-xl border border-line bg-panel px-4 py-2.5 text-[11px] text-mute transition-colors hover:text-cream">取消</button>
+      <button @click="saveSettings()" class="rounded-xl bg-acc px-5 py-2.5 text-[11px] font-semibold text-ink transition-transform active:scale-[.98]">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 提示 -->
+<div x-show="toast.show" x-transition:enter="transition duration-200 ease-out" x-transition:enter-start="opacity-0 translate-y-3" x-transition:enter-end="opacity-100 translate-y-0"
+     class="fixed bottom-6 right-6 z-[60] flex items-center gap-2.5 rounded-xl border bg-elev/95 px-4 py-3 text-[12px] shadow-lift backdrop-blur"
+     :class="toast.type === 'err' ? 'border-red-400/40 text-red-300' : 'border-okc/40 text-okc'">
+  <i :data-lucide="toast.type === 'err' ? 'circle-alert' : 'circle-check'" class="size-4"></i>
+  <span x-text="toast.msg"></span>
+</div>
+
+</body>
+</html>

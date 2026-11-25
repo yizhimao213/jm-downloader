@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jm-downloader",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-24",
+
+  "containers": [
+    {
+      "class_name": "JmDownloader",
+      "image": "./Dockerfile",
+      "instance_type": "lite"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "JM_CONTAINER", "class_name": "JmDownloader" }
+    ]
+  },
+  "exports": {
+    "JmDownloader": { "type": "DurableObject" }
+  },
+
+  "routes": [
+    { "pattern": "jm.ixoxi.cn", "zone_id": "a43bb80c5c9c937e8d09117817416be3" }
+  ]
+}

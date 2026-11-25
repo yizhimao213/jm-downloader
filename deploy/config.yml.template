@@ -1,0 +1,7 @@
+tunnel: 在这里填隧道ID
+credentials-file: C:\Users\Administrator\.cloudflared\在这里填隧道ID.json
+
+ingress:
+  - hostname: jm.ixoxi.cn
+    service: http://localhost:8899
+  - service: http_status:404
