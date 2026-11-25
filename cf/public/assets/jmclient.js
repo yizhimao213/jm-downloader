@@ -433,7 +433,9 @@
 
   async function processImage(url, photoId, filename, scrambleId) {
     const blob = await fetchImageBlob(url);
-    const num = segNum(photoId, filename, scrambleId);
+    // 分割数要用不带扩展名的文件名参与 md5，带后缀会算出错误段数
+    const stem = String(filename).replace(/\.[a-z0-9]+$/i, '');
+    const num = segNum(photoId, stem, scrambleId);
     if (!num) return blob;
     const bitmap = await createImageBitmap(blob);
     const canvas = descrambleBitmap(bitmap, num);
@@ -677,5 +679,6 @@
   }
 
   window.JMApi = handle;
-  window.JMDecode = { md5hex, decodePayload, segNum };
+  // 调试出口：便于在控制台核验解密与重排结果
+  window.JMDecode = { md5hex, decodePayload, segNum, processImage, descrambleBitmap };
 })();
